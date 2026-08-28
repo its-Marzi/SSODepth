@@ -1,0 +1,6 @@
+build/
+deps/
+*.log
+*.ini
+*.addon64
+*.dll
