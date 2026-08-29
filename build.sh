@@ -28,10 +28,7 @@ if [ ! -d "$RESHade_DIR/.git" ]; then
         "$RESHade_DIR"
 fi
 
-#
-# ReShade uses the Windows/MSVC spelling <Windows.h>.
-# Linux filesystems are case-sensitive, while MinGW installs windows.h.
-#
+# MinGW on Linux needs lowercase windows.h
 if grep -q '#include <Windows.h>' \
     "$RESHade_DIR/include/reshade.hpp"; then
 
