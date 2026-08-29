@@ -2,14 +2,18 @@
 #include <guiddef.h>
 #include <GL/gl.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
-#include <unordered_map>
 #include <mutex>
+#include <unordered_map>
 
 /*
- * MinGW compatibility shim for ReShade's MSVC-oriented __uuidof
- * convenience templates.
+ * MinGW compatibility shim.
+ *
+ * ReShade's public headers contain MSVC-oriented __uuidof convenience
+ * templates. SSODepth does not use those templates, but GCC still needs
+ * to parse them.
  */
 static const GUID g_reshade_dummy_uuid = {};
 
@@ -48,8 +52,18 @@ static const GUID g_reshade_dummy_uuid = {};
 extern "C" __declspec(dllexport) const char *NAME =
     "SSO Depth";
 
+extern "C" __declspec(dllexport) const char *AUTHOR =
+    "Marzi";
+
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
-    "Star Stable Online depth bridge for ReShade on Wine/OpenGL.";
+    "Provides Star Stable Online's native OpenGL scene depth texture "
+    "to ReShade effects under Wine.";
+
+extern "C" __declspec(dllexport) const char *WEBSITE =
+    "https://github.com/its-Marzi/SSODepth";
+
+extern "C" __declspec(dllexport) const char *ISSUES =
+    "https://github.com/its-Marzi/SSODepth/issues";
 
 using BindFramebufferFn =
     void (APIENTRY *)(GLenum target, GLuint framebuffer);
@@ -61,26 +75,36 @@ using GetFramebufferAttachmentParameterivFn =
         GLenum pname,
         GLint *params);
 
-static GLuint g_scene_fbo = 0;
-static unsigned int g_scene_width = 0;
-static unsigned int g_scene_height = 0;
+/*
+ * Most recently observed full-resolution scene framebuffer.
+ *
+ * OpenGL object names are not stable between launches, so this is
+ * detected dynamically rather than hard-coded.
+ */
+static std::atomic<GLuint> g_scene_fbo { 0 };
+static std::atomic<std::uint32_t> g_scene_width { 0 };
+static std::atomic<std::uint32_t> g_scene_height { 0 };
 
 /*
- * ReShade already knows about many OpenGL texture views.
- *
- * Remember the exact native ReShade handle for each OpenGL texture ID,
- * so we do not have to guess the texture target if ReShade saw it.
+ * Map native OpenGL texture object IDs to ReShade's own resource_view
+ * handles. Using ReShade's tracked handle means we do not need to guess
+ * how to construct a resource_view ourselves.
  */
 static std::unordered_map<std::uint32_t, std::uint64_t> g_texture_views;
 static std::mutex g_texture_views_mutex;
 
-static std::uint64_t g_begin_effects_calls = 0;
+/*
+ * Used only to avoid repeating the same informational log message
+ * every frame.
+ */
+static std::atomic<std::uint64_t> g_last_bound_pair { 0 };
 
 static void detect_scene_fbo()
 {
     GLint viewport[4] = {};
     GLint draw_fbo = 0;
     GLint depth_bits = 0;
+    GLboolean depth_write = GL_FALSE;
 
     glGetIntegerv(
         GL_VIEWPORT,
@@ -94,35 +118,44 @@ static void detect_scene_fbo()
         GL_DEPTH_BITS,
         &depth_bits);
 
+    glGetBooleanv(
+        GL_DEPTH_WRITEMASK,
+        &depth_write);
+
     const bool depth_test =
         glIsEnabled(GL_DEPTH_TEST) == GL_TRUE;
 
     /*
-     * This is the pattern we observed for SSO's main world pass:
+     * SSO's main world pass has consistently presented as:
      *
-     * - full-resolution viewport
-     * - non-zero FBO
-     * - real depth buffer
-     * - depth testing active
+     *   - non-zero FBO
+     *   - full-resolution viewport
+     *   - depth testing enabled
+     *   - depth writes enabled
+     *   - 24/32-bit depth
      *
-     * It excludes the 1024x1024 auxiliary/shadow pass and
-     * ReShade's own depth-less effect framebuffer.
+     * Requiring depth writes prevents later full-resolution
+     * post-processing passes from replacing the scene candidate.
      */
     if (
         draw_fbo != 0 &&
         viewport[2] >= 1280 &&
         viewport[3] >= 720 &&
         depth_bits >= 24 &&
-        depth_test)
+        depth_test &&
+        depth_write == GL_TRUE)
     {
-        g_scene_fbo =
-            static_cast<GLuint>(draw_fbo);
+        g_scene_fbo.store(
+            static_cast<GLuint>(draw_fbo),
+            std::memory_order_relaxed);
 
-        g_scene_width =
-            static_cast<unsigned int>(viewport[2]);
+        g_scene_width.store(
+            static_cast<std::uint32_t>(viewport[2]),
+            std::memory_order_relaxed);
 
-        g_scene_height =
-            static_cast<unsigned int>(viewport[3]);
+        g_scene_height.store(
+            static_cast<std::uint32_t>(viewport[3]),
+            std::memory_order_relaxed);
     }
 }
 
@@ -163,6 +196,10 @@ static void on_init_resource_view(
         return;
     }
 
+    /*
+     * ReShade's OpenGL resource_view encoding contains the native
+     * OpenGL object ID in the lower 32 bits.
+     */
     const std::uint32_t object =
         static_cast<std::uint32_t>(
             view.handle & 0xFFFFFFFFull);
@@ -219,10 +256,39 @@ static void on_reshade_begin_effects(
     reshade::api::resource_view,
     reshade::api::resource_view)
 {
-    ++g_begin_effects_calls;
+    const GLuint scene_fbo =
+        g_scene_fbo.load(
+            std::memory_order_relaxed);
 
-    if (g_scene_fbo == 0)
+    const std::uint32_t scene_width =
+        g_scene_width.load(
+            std::memory_order_relaxed);
+
+    const std::uint32_t scene_height =
+        g_scene_height.load(
+            std::memory_order_relaxed);
+
+    if (scene_fbo == 0)
         return;
+
+    /*
+     * Verify that our candidate matches the current ReShade runtime
+     * dimensions. This prevents a similarly shaped auxiliary buffer
+     * from being exposed as DEPTH after a resolution change.
+     */
+    std::uint32_t runtime_width = 0;
+    std::uint32_t runtime_height = 0;
+
+    runtime->get_screenshot_width_and_height(
+        &runtime_width,
+        &runtime_height);
+
+    if (
+        scene_width != runtime_width ||
+        scene_height != runtime_height)
+    {
+        return;
+    }
 
     auto bind_framebuffer =
         reinterpret_cast<BindFramebufferFn>(
@@ -249,7 +315,7 @@ static void on_reshade_begin_effects(
 
     bind_framebuffer(
         GL_READ_FRAMEBUFFER,
-        g_scene_fbo);
+        scene_fbo);
 
     GLint object_type = 0;
     GLint object_name = 0;
@@ -267,16 +333,17 @@ static void on_reshade_begin_effects(
         &object_name);
 
     /*
-     * Restore the GL state immediately.
+     * Restore SSO/ReShade's OpenGL state before doing anything else.
      */
     bind_framebuffer(
         GL_READ_FRAMEBUFFER,
-        static_cast<GLuint>(previous_read_fbo));
+        static_cast<GLuint>(
+            previous_read_fbo));
 
     /*
-     * We can only directly sample an actual texture.
+     * We deliberately only support a native texture here.
      *
-     * 0x1702 == GL_TEXTURE.
+     * GL_TEXTURE == 0x1702.
      */
     if (
         object_type != GL_TEXTURE ||
@@ -287,85 +354,58 @@ static void on_reshade_begin_effects(
 
     reshade::api::resource_view depth_view = {};
 
-    bool used_tracked_view = false;
-
-    /*
-     * Prefer the exact OpenGL view handle ReShade observed when
-     * the texture was created.
-     */
     {
         std::lock_guard<std::mutex> lock(
             g_texture_views_mutex);
 
-        auto it =
+        const auto it =
             g_texture_views.find(
                 static_cast<std::uint32_t>(
                     object_name));
 
-        if (it != g_texture_views.end())
-        {
-            depth_view.handle = it->second;
-            used_tracked_view = true;
-        }
-    }
+        if (it == g_texture_views.end())
+            return;
 
-    /*
-     * Fallback:
-     *
-     * ReShade documents OpenGL resource_view handles as:
-     *
-     *   upper 24 bits = OpenGL target
-     *   lower 32 bits = OpenGL object ID
-     *
-     * SSO's full-resolution depth attachment is expected to be
-     * a normal GL_TEXTURE_2D.
-     */
-    if (depth_view.handle == 0)
-    {
         depth_view.handle =
-            (static_cast<std::uint64_t>(
-                GL_TEXTURE_2D) << 40) |
-            static_cast<std::uint32_t>(
-                object_name);
+            it->second;
     }
 
     /*
-     * THIS IS THE ACTUAL BRIDGE.
-     *
-     * Every ReShade FX texture declared with the DEPTH semantic
-     * should now point at SSO's scene depth texture.
+     * Expose SSO's real scene depth to every ReShade effect that uses
+     * the standard DEPTH semantic.
      */
     runtime->update_texture_bindings(
         "DEPTH",
         depth_view,
         depth_view);
 
-    if (
-        g_begin_effects_calls <= 10 ||
-        (g_begin_effects_calls % 600) == 0)
-    {
-        const std::uint32_t target =
-            static_cast<std::uint32_t>(
-                depth_view.handle >> 40);
+    /*
+     * Log only when the framebuffer/depth texture pair changes.
+     */
+    const std::uint64_t pair =
+        (static_cast<std::uint64_t>(
+            scene_fbo) << 32) |
+        static_cast<std::uint32_t>(
+            object_name);
 
-        char message[512];
+    const std::uint64_t previous_pair =
+        g_last_bound_pair.exchange(
+            pair,
+            std::memory_order_relaxed);
+
+    if (pair != previous_pair)
+    {
+        char message[384];
 
         std::snprintf(
             message,
             sizeof(message),
-            "DEPTH BRIDGE | sceneFBO=%u | size=%ux%u | "
-            "texture=%d | view=0x%llX | target=0x%X | "
-            "source=%s",
-            g_scene_fbo,
-            g_scene_width,
-            g_scene_height,
-            object_name,
-            static_cast<unsigned long long>(
-                depth_view.handle),
-            target,
-            used_tracked_view
-                ? "tracked"
-                : "fallback-GL_TEXTURE_2D");
+            "Active depth bridge: %ux%u, FBO %u, "
+            "OpenGL texture %d.",
+            scene_width,
+            scene_height,
+            scene_fbo,
+            object_name);
 
         reshade::log::message(
             reshade::log::level::info,
@@ -407,30 +447,14 @@ BOOL APIENTRY DllMain(
 
         reshade::log::message(
             reshade::log::level::info,
-            "SSO direct depth bridge loaded.");
+            "SSO Depth loaded.");
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
-        reshade::unregister_event<
-            reshade::addon_event::reshade_begin_effects
-        >(&on_reshade_begin_effects);
-
-        reshade::unregister_event<
-            reshade::addon_event::draw_indexed
-        >(&on_draw_indexed);
-
-        reshade::unregister_event<
-            reshade::addon_event::draw
-        >(&on_draw);
-
-        reshade::unregister_event<
-            reshade::addon_event::destroy_resource_view
-        >(&on_destroy_resource_view);
-
-        reshade::unregister_event<
-            reshade::addon_event::init_resource_view
-        >(&on_init_resource_view);
-
+        /*
+         * ReShade unregisters callbacks belonging to this add-on when
+         * the add-on itself is unregistered.
+         */
         reshade::unregister_addon(module);
     }
 
