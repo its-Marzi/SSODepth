@@ -7,9 +7,9 @@ If effects such as depth of field, ambient occlusion, fog, or `DisplayDepth` do 
 It is designed to work automatically once installed. There are no settings you need to configure.
 
 > [!IMPORTANT]
-> SSO Depth is currently **tested and confirmed working on Linux through Wine**.
+> SSO Depth has been confirmed working on both **Linux through Wine** and **native Windows 11**.
 >
-> Star Stable also uses OpenGL on Windows, so the add-on may help Windows players who experience broken ReShade depth detection as well. **Native Windows support is currently experimental and needs more testing.**
+> Testing across more GPUs, Windows versions, Wine runners, and Linux distributions is still welcome.
 
 ---
 
@@ -44,7 +44,7 @@ Other effects that use ReShade's normal `DEPTH` texture should work as well.
 
 You need:
 
-- Star Stable Online on Linux through Wine, or native Windows for experimental testing
+- Star Stable Online on Windows or Linux through Wine
 - ReShade **6.8.0**
 - the **full add-on version** of ReShade
 - ReShade already working inside SSO
@@ -123,6 +123,16 @@ If everything loaded correctly, **SSO Depth** should appear in ReShade's **Add-o
 You do not need to select a depth buffer or change any SSO Depth settings.
 
 ---
+
+## Do I need Generic Depth?
+
+No.
+
+SSO Depth supplies Star Stable's depth texture directly to ReShade, so the **Generic Depth** add-on is not required.
+
+If Generic Depth already works correctly on your computer, you can continue using it. If it does not work, or you want SSO Depth to handle depth instead, you can disable Generic Depth from ReShade's **Add-ons** tab.
+
+Depth-based effects such as `DisplayDepth`, qUINT ADOF, qUINT MXAO, and DepthHaze can still work through SSO Depth with Generic Depth disabled.
 
 # Checking if it works
 
@@ -310,11 +320,13 @@ build/SSODepth.addon64
 
 Star Stable Online's OpenGL renderer has a usable scene depth buffer.
 
-The problem is that ReShade's normal Generic Depth detection can sometimes fail to identify that buffer correctly. This has been confirmed on Linux through Wine, and similar depth-detection problems have also been reported by Windows players.
+ReShade's normal Generic Depth detection usually finds this buffer correctly, but on some systems it may fail or select an unusable depth resource.
 
-SSO Depth watches SSO's OpenGL rendering, identifies the full-resolution scene framebuffer, finds its depth texture, matches that texture to the resource already tracked by ReShade, and supplies it to ReShade effects using the standard `DEPTH` texture semantic.
+SSO Depth takes a different approach. It watches SSO's OpenGL rendering, identifies the full-resolution scene framebuffer, finds its depth texture, matches that texture to the resource already tracked by ReShade, and supplies it directly to effects using ReShade's standard `DEPTH` texture semantic.
 
-This means individual shaders do not need to be modified specifically for SSO Depth.
+Because of this, SSO Depth does not depend on Generic Depth's automatic buffer selection or copy heuristics.
+
+Individual shaders do not need to be modified specifically for SSO Depth.
 
 ---
 
@@ -323,20 +335,18 @@ This means individual shaders do not need to be modified specifically for SSO De
 ### Confirmed working
 
 - Star Stable Online
+- Native Windows 11
 - Linux through Wine
 - OpenGL
 - ReShade 6.8.0 with full add-on support
-- AMD Radeon RX 7800 XT / Mesa
 
-### Experimental
+Tested hardware includes:
 
-- Native Windows
+- AMD Radeon RX 7800 XT / Mesa on Linux
 
-Star Stable uses OpenGL on Windows as well, and SSO Depth's method is not inherently Wine-specific. However, native Windows has not yet been tested directly.
+SSO Depth has also been tested successfully on a native Windows 11 installation with ReShade's Generic Depth add-on disabled.
 
-Other Linux distributions, Wine runners, GPUs, resolutions, and configurations may also work, but have not all been tested yet.
-
-If you try SSO Depth on Windows or a different Linux setup, testing reports are welcome.
+More testing on different GPUs, Windows versions, Linux distributions, Wine runners, resolutions, and other configurations is welcome.
 
 # Current status
 
