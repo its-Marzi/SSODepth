@@ -77,7 +77,8 @@ using GetFramebufferAttachmentParameterivFn =
 static std::atomic<GLuint> g_scene_fbo { 0 };
 static std::atomic<std::uint32_t> g_scene_width { 0 };
 static std::atomic<std::uint32_t> g_scene_height { 0 };
-
+static std::atomic<std::uint32_t> g_output_width { 0 };
+static std::atomic<std::uint32_t> g_output_height { 0 };
 
 // Map OpenGL texture IDs to the resource views ReShade created for them.
 static std::unordered_map<std::uint32_t, std::uint64_t> g_texture_views;
@@ -102,11 +103,20 @@ static void detect_scene_framebuffer()
 
     const bool depth_test = glIsEnabled(GL_DEPTH_TEST) == GL_TRUE;
 
-    // SSO's main scene pass uses a large framebuffer with depth testing
-    // and depth writes enabled. Smaller render passes are ignored.
+    const std::uint32_t output_width =
+        g_output_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t output_height =
+        g_output_height.load(std::memory_order_relaxed);
+
+    if (output_width == 0 || output_height == 0)
+        return;
+
+    // SSO's main scene pass matches the current output size and writes depth.
+    // This filters out smaller auxiliary render passes.
     if (draw_fbo != 0 &&
-        viewport[2] >= 1280 &&
-        viewport[3] >= 720 &&
+        static_cast<std::uint32_t>(viewport[2]) == output_width &&
+        static_cast<std::uint32_t>(viewport[3]) == output_height &&
         depth_bits >= 24 &&
         depth_test &&
         depth_write == GL_TRUE)
@@ -205,6 +215,16 @@ static void on_reshade_begin_effects(
     reshade::api::resource_view,
     reshade::api::resource_view)
 {
+    std::uint32_t runtime_width = 0;
+    std::uint32_t runtime_height = 0;
+
+    runtime->get_screenshot_width_and_height(
+        &runtime_width,
+        &runtime_height);
+
+    g_output_width.store(runtime_width, std::memory_order_relaxed);
+    g_output_height.store(runtime_height, std::memory_order_relaxed);
+
     const GLuint scene_fbo =
         g_scene_fbo.load(std::memory_order_relaxed);
 
@@ -217,15 +237,7 @@ static void on_reshade_begin_effects(
     if (scene_fbo == 0)
         return;
 
-
-    // Make sure the scene buffer still matches ReShade's current output size.
-    std::uint32_t runtime_width = 0;
-    std::uint32_t runtime_height = 0;
-
-    runtime->get_screenshot_width_and_height(
-        &runtime_width,
-        &runtime_height);
-
+    // Make sure the detected scene buffer still matches ReShade's output size.
     if (scene_width != runtime_width || scene_height != runtime_height)
         return;
 
