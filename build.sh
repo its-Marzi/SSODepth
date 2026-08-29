@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESHade_DIR="$ROOT/deps/reshade"
+RESHADE_DIR="$ROOT/deps/reshade"
 BUILD_DIR="$ROOT/build"
 
 echo "==> Building SSODepth"
@@ -17,7 +17,7 @@ if ! command -v x86_64-w64-mingw32-g++ >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -d "$RESHade_DIR/.git" ]; then
+if [ ! -d "$RESHADE_DIR/.git" ]; then
     echo "==> Fetching ReShade 6.8.0"
     mkdir -p "$ROOT/deps"
 
@@ -25,18 +25,18 @@ if [ ! -d "$RESHade_DIR/.git" ]; then
         --depth 1 \
         --branch v6.8.0 \
         https://github.com/crosire/reshade.git \
-        "$RESHade_DIR"
+        "$RESHADE_DIR"
 fi
 
 # MinGW on Linux needs lowercase windows.h
 if grep -q '#include <Windows.h>' \
-    "$RESHade_DIR/include/reshade.hpp"; then
+    "$RESHADE_DIR/include/reshade.hpp"; then
 
     echo "==> Applying MinGW/Linux header compatibility patch"
 
     sed -i \
         's/#include <Windows.h>/#include <windows.h>/' \
-        "$RESHade_DIR/include/reshade.hpp"
+        "$RESHADE_DIR/include/reshade.hpp"
 fi
 
 mkdir -p "$BUILD_DIR"
@@ -50,7 +50,7 @@ x86_64-w64-mingw32-g++ \
     -static \
     -DWIN32_LEAN_AND_MEAN \
     -DNOMINMAX \
-    -I"$RESHade_DIR/include" \
+    -I"$RESHADE_DIR/include" \
     -static-libgcc \
     -static-libstdc++ \
     -o "$BUILD_DIR/SSODepth.addon64" \
