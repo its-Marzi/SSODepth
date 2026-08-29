@@ -345,4 +345,8 @@ More testing on different Linux systems, GPUs, resolutions, and Wine configurati
 
 # License
 
-A license has not been chosen yet.
+SSO Depth is licensed under the [MIT License](LICENSE).
+
+It uses the public ReShade API headers, which are available under the BSD 3-Clause or MIT licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
+
+SSO Depth is an independent community project and is not affiliated with or endorsed by Star Stable Entertainment or the ReShade project.
