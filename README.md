@@ -25,6 +25,12 @@ SSO Depth should appear in ReShade's Add-ons tab.
 
 There are no settings to configure. ReShade's Generic Depth add-on is not required.
 
+## UI and cursor
+
+SSO Depth runs ReShade effects before Star Stable draws its interface and mouse cursor. This means effects such as DOF can affect the game world while the UI stays sharp automatically.
+
+No extra UI shader or special technique order is required.
+
 ## Having problems?
 
 First make sure:
@@ -60,7 +66,7 @@ If you open a GitHub issue, please include your `ReShade.log`, operating system,
 
 SSO Depth is licensed under the [MIT License](LICENSE).
 
-It uses the public ReShade API headers. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
+It uses the ReShade add-on API and state-tracking utility code. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
 
 SSO Depth is an independent community project and is not affiliated with or endorsed by Star Stable Entertainment or the ReShade project.
 

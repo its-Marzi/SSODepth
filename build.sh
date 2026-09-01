@@ -51,10 +51,13 @@ x86_64-w64-mingw32-g++ \
     -DWIN32_LEAN_AND_MEAN \
     -DNOMINMAX \
     -I"$RESHADE_DIR/include" \
+    -I"$RESHADE_DIR/examples/utils" \
+    -include "$ROOT/src/reshade_mingw_compat.hpp" \
     -static-libgcc \
     -static-libstdc++ \
     -o "$BUILD_DIR/SSODepth.addon64" \
     "$ROOT/src/addon.cpp" \
+    "$RESHADE_DIR/examples/utils/state_tracking.cpp" \
     -lopengl32
 
 echo
