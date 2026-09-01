@@ -42,23 +42,13 @@ First make sure:
 <details>
 <summary><b>Still not working?</b></summary>
 
-You can test the depth buffer with `DisplayDepth`.
+Open ReShade's **Add-ons** tab and expand **SSO Depth**.
 
-The settings used during testing are:
+The built-in self-test checks scene detection, depth access, UI-safe rendering, and the depth configuration expected by SSO Depth.
 
-```text
-RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN=1
-RESHADE_DEPTH_INPUT_IS_REVERSED=0
-RESHADE_DEPTH_INPUT_IS_LOGARITHMIC=0
-```
+Click **Copy diagnostic report** and include the report when asking for help or opening a GitHub issue.
 
-You can also check `ReShade.log`. A working installation should contain something similar to:
-
-```text
-[SSO Depth] Active depth bridge: 1920x1080, FBO ..., OpenGL texture ...
-```
-
-If you open a GitHub issue, please include your `ReShade.log`, operating system, GPU, ReShade version, and how you run SSO.
+You can also test the depth buffer visually with `DisplayDepth`.
 
 </details>
 

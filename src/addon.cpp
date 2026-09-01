@@ -79,7 +79,7 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
-static constexpr const char *SSODEPTH_VERSION = "0.3.0-dev";
+static constexpr const char *SSODEPTH_VERSION = "0.3.0";
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
