@@ -79,10 +79,13 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
-static constexpr const char *SSODEPTH_VERSION = "0.3.0";
+static constexpr const char *SSODEPTH_VERSION = "0.4.0-dev";
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
+
+static std::atomic<bool> g_auto_configure_depth { true };
+static std::atomic<bool> g_depth_corrected_this_session { false };
 
 
 using BindFramebufferFn =
@@ -735,6 +738,10 @@ static void update_depth_binding(
 
 
 
+static bool configure_depth_if_needed(
+    reshade::api::effect_runtime *runtime);
+
+
 static void on_init_effect_runtime(
     reshade::api::effect_runtime *runtime)
 {
@@ -743,6 +750,18 @@ static void on_init_effect_runtime(
     {
         return;
     }
+
+    bool auto_configure_depth = true;
+
+    reshade::get_config_value(
+        nullptr,
+        "SSODEPTH",
+        "AutoConfigureDepth",
+        auto_configure_depth);
+
+    g_auto_configure_depth.store(
+        auto_configure_depth,
+        std::memory_order_relaxed);
 
     g_runtime.store(
         runtime,
@@ -786,6 +805,9 @@ static void on_reshade_present(
 {
     if (runtime != g_runtime.load(std::memory_order_relaxed))
         return;
+
+    if (g_auto_configure_depth.load(std::memory_order_relaxed))
+        configure_depth_if_needed(runtime);
 
     g_effects_rendered_this_frame.store(
         false,
@@ -933,6 +955,155 @@ static depth_configuration read_depth_configuration(
 }
 
 
+static bool configure_depth_if_needed(
+    reshade::api::effect_runtime *runtime)
+{
+    if (runtime == nullptr ||
+        runtime->get_device()->get_api() !=
+            reshade::api::device_api::opengl)
+    {
+        return false;
+    }
+
+    char global_upside_down[64] = {};
+    char global_reversed[64] = {};
+    char global_logarithmic[64] = {};
+    char global_far_plane[64] = {};
+
+    const bool has_global_upside_down =
+        runtime->get_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
+            global_upside_down);
+
+    const bool has_global_reversed =
+        runtime->get_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_INPUT_IS_REVERSED",
+            global_reversed);
+
+    const bool has_global_logarithmic =
+        runtime->get_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC",
+            global_logarithmic);
+
+    const bool has_global_far_plane =
+        runtime->get_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_LINEARIZATION_FAR_PLANE",
+            global_far_plane);
+
+    bool global_far_plane_ok = true;
+
+    if (has_global_far_plane)
+    {
+        char *end = nullptr;
+
+        const double value =
+            std::strtod(global_far_plane, &end);
+
+        global_far_plane_ok =
+            end != global_far_plane &&
+            end != nullptr &&
+            *end == '\0' &&
+            value >= 999.999 &&
+            value <= 1000.001;
+    }
+
+    bool changed = false;
+
+    // Store SSO's required depth orientation globally so every
+    // ReShade preset inherits the same configuration.
+    if (!has_global_upside_down ||
+        std::strcmp(global_upside_down, "1") != 0)
+    {
+        runtime->set_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
+            "1");
+
+        changed = true;
+    }
+
+    if (!has_global_reversed ||
+        std::strcmp(global_reversed, "0") != 0)
+    {
+        runtime->set_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_INPUT_IS_REVERSED",
+            "0");
+
+        changed = true;
+    }
+
+    // ReShade's defaults already match SSO for these values. Leave
+    // absent definitions alone, but correct conflicting global values.
+    if (has_global_logarithmic &&
+        std::strcmp(global_logarithmic, "0") != 0)
+    {
+        runtime->set_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC",
+            "0");
+
+        changed = true;
+    }
+
+    if (has_global_far_plane &&
+        !global_far_plane_ok)
+    {
+        runtime->set_preprocessor_definition_for_effect(
+            "GLOBAL",
+            "RESHADE_DEPTH_LINEARIZATION_FAR_PLANE",
+            "1000.0");
+
+        changed = true;
+    }
+
+    // Preset definitions take precedence over global definitions.
+    // Remove depth overrides from the active preset so it inherits
+    // SSO Depth's canonical global configuration.
+    const char *const depth_definitions[] = {
+        "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
+        "RESHADE_DEPTH_INPUT_IS_REVERSED",
+        "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC",
+        "RESHADE_DEPTH_LINEARIZATION_FAR_PLANE"
+    };
+
+    for (const char *const definition : depth_definitions)
+    {
+        char preset_value[64] = {};
+
+        if (runtime->get_preprocessor_definition_for_effect(
+                "PRESET",
+                definition,
+                preset_value))
+        {
+            runtime->set_preprocessor_definition_for_effect(
+                "PRESET",
+                definition,
+                nullptr);
+
+            changed = true;
+        }
+    }
+
+    if (changed)
+    {
+        g_depth_corrected_this_session.store(
+            true,
+            std::memory_order_relaxed);
+
+        reshade::log::message(
+            reshade::log::level::info,
+            "Corrected ReShade depth configuration for SSO.");
+    }
+
+    return changed;
+}
+
+
 static const char *definition_value(
     bool exists,
     const char *value)
@@ -1062,6 +1233,40 @@ static void draw_settings_overlay(
     ImGui::Separator();
 
     ImGui::TextUnformatted("Depth configuration");
+
+    bool auto_configure_depth =
+        g_auto_configure_depth.load(std::memory_order_relaxed);
+
+    if (ImGui::Checkbox(
+            "Automatically configure SSO depth settings",
+            &auto_configure_depth))
+    {
+        g_auto_configure_depth.store(
+            auto_configure_depth,
+            std::memory_order_relaxed);
+
+        reshade::set_config_value(
+            nullptr,
+            "SSODEPTH",
+            "AutoConfigureDepth",
+            auto_configure_depth);
+
+        if (auto_configure_depth)
+            configure_depth_if_needed(runtime);
+    }
+
+    ImGui::TextWrapped(
+        "Keeps ReShade's depth settings compatible with SSO "
+        "and removes conflicting preset overrides.");
+
+    if (g_depth_corrected_this_session.load(
+            std::memory_order_relaxed))
+    {
+        ImGui::TextUnformatted(
+            "Corrected incompatible depth settings this session.");
+    }
+
+    ImGui::Spacing();
 
     draw_diagnostic_status(
         depth_config.upside_down_ok,
@@ -1240,6 +1445,8 @@ static void draw_settings_overlay(
             "UI-safe effect rendering: %s\n"
             "\n"
             "Depth configuration\n"
+            "Automatic configuration: %s\n"
+            "Corrected this session: %s\n"
             "Upside down: %s (%s)\n"
             "Reversed: %s (%s)\n"
             "Logarithmic: %s\n"
@@ -1268,6 +1475,13 @@ static void draw_settings_overlay(
             depth_ok ? "OK" : "NOT CONFIRMED",
             early_target_ok ? "OK" : "NOT READY",
             ui_safe_ok ? "OK" : "NOT CONFIRMED",
+            g_auto_configure_depth.load(std::memory_order_relaxed)
+                ? "enabled"
+                : "disabled",
+            g_depth_corrected_this_session.load(
+                std::memory_order_relaxed)
+                ? "yes"
+                : "no",
             definition_value(
                 depth_config.has_upside_down,
                 depth_config.upside_down),

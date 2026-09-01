@@ -23,7 +23,9 @@ You need **ReShade 6.8.0 with full add-on support** already working in Star Stab
 
 SSO Depth should appear in ReShade's Add-ons tab.
 
-There are no settings to configure. ReShade's Generic Depth add-on is not required.
+No manual depth configuration is required. SSO Depth automatically applies the ReShade depth settings Star Stable needs.
+
+ReShade's Generic Depth add-on is not required.
 
 ## UI and cursor
 
