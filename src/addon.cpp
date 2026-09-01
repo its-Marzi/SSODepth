@@ -5,9 +5,13 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 
+#define IMGUI_DISABLE_INCLUDE_IMCONFIG_H
+#include <imgui.h>
 #include <reshade.hpp>
 #include "state_tracking.hpp"
 
@@ -73,6 +77,12 @@ extern "C" __declspec(dllexport) const char *WEBSITE =
 
 extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
+
+
+static constexpr const char *SSODEPTH_VERSION = "0.3.0-dev";
+
+static char g_addon_path[MAX_PATH] = {};
+static char g_executable_path[MAX_PATH] = {};
 
 
 using BindFramebufferFn =
@@ -809,6 +819,506 @@ static void on_reshade_begin_effects(
 }
 
 
+static const char *safe_gl_string(GLenum name)
+{
+    const GLubyte *const value = glGetString(name);
+
+    return value != nullptr
+        ? reinterpret_cast<const char *>(value)
+        : "Unavailable";
+}
+
+
+static void draw_diagnostic_status(
+    bool ok,
+    const char *label)
+{
+    ImGui::Text(
+        "%s %s",
+        ok ? "[OK]" : "[--]",
+        label);
+}
+
+
+struct depth_configuration
+{
+    char upside_down[64] = {};
+    char reversed[64] = {};
+    char logarithmic[64] = {};
+    char far_plane[64] = {};
+
+    bool has_upside_down = false;
+    bool has_reversed = false;
+    bool has_logarithmic = false;
+    bool has_far_plane = false;
+
+    bool upside_down_ok = false;
+    bool reversed_ok = false;
+    bool logarithmic_ok = false;
+    bool far_plane_ok = false;
+};
+
+
+static depth_configuration read_depth_configuration(
+    reshade::api::effect_runtime *runtime)
+{
+    depth_configuration result = {};
+
+    if (runtime == nullptr)
+        return result;
+
+    result.has_upside_down =
+        runtime->get_preprocessor_definition(
+            "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
+            result.upside_down);
+
+    result.has_reversed =
+        runtime->get_preprocessor_definition(
+            "RESHADE_DEPTH_INPUT_IS_REVERSED",
+            result.reversed);
+
+    result.has_logarithmic =
+        runtime->get_preprocessor_definition(
+            "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC",
+            result.logarithmic);
+
+    result.has_far_plane =
+        runtime->get_preprocessor_definition(
+            "RESHADE_DEPTH_LINEARIZATION_FAR_PLANE",
+            result.far_plane);
+
+    // ReShade.fxh provides defaults when these definitions are absent:
+    //
+    //   UPSIDE_DOWN = 0
+    //   REVERSED = 1
+    //   LOGARITHMIC = 0
+    //   FAR_PLANE = 1000.0
+    //
+    // SSO therefore requires explicit overrides for upside-down and
+    // reversed depth, while logarithmic and far-plane may safely use
+    // ReShade's built-in defaults.
+
+    result.upside_down_ok =
+        result.has_upside_down &&
+        std::strcmp(result.upside_down, "1") == 0;
+
+    result.reversed_ok =
+        result.has_reversed &&
+        std::strcmp(result.reversed, "0") == 0;
+
+    result.logarithmic_ok =
+        !result.has_logarithmic ||
+        std::strcmp(result.logarithmic, "0") == 0;
+
+    if (!result.has_far_plane)
+    {
+        result.far_plane_ok = true;
+    }
+    else
+    {
+        char *end = nullptr;
+
+        const double value =
+            std::strtod(result.far_plane, &end);
+
+        result.far_plane_ok =
+            end != result.far_plane &&
+            end != nullptr &&
+            *end == '\0' &&
+            value >= 999.999 &&
+            value <= 1000.001;
+    }
+
+    return result;
+}
+
+
+static const char *definition_value(
+    bool exists,
+    const char *value)
+{
+    return exists ? value : "not set";
+}
+
+
+static void draw_settings_overlay(
+    reshade::api::effect_runtime *runtime)
+{
+    const bool runtime_ok =
+        runtime != nullptr &&
+        runtime == g_runtime.load(std::memory_order_relaxed);
+
+    const bool opengl_ok =
+        runtime_ok &&
+        runtime->get_device()->get_api() ==
+            reshade::api::device_api::opengl;
+
+    const GLuint scene_fbo =
+        g_scene_fbo.load(std::memory_order_relaxed);
+
+    const std::uint32_t scene_width =
+        g_scene_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t scene_height =
+        g_scene_height.load(std::memory_order_relaxed);
+
+    const std::uint32_t output_width =
+        g_output_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t output_height =
+        g_output_height.load(std::memory_order_relaxed);
+
+    const std::uint64_t depth_key =
+        g_last_depth_key.load(std::memory_order_relaxed);
+
+    const bool scene_ok =
+        scene_fbo != 0 &&
+        scene_width != 0 &&
+        scene_height != 0;
+
+    const bool depth_ok =
+        depth_key != 0;
+
+    const bool early_target_ok =
+        g_early_effects_texture != 0 &&
+        g_early_effects_rtv != 0 &&
+        g_early_effects_rtv_srgb != 0;
+
+    const bool ui_safe_ok =
+        g_logged_early_effects.load(std::memory_order_relaxed);
+
+    const depth_configuration depth_config =
+        read_depth_configuration(runtime);
+
+    const bool depth_config_ok =
+        depth_config.upside_down_ok &&
+        depth_config.reversed_ok &&
+        depth_config.logarithmic_ok &&
+        depth_config.far_plane_ok;
+
+    const bool everything_ok =
+        runtime_ok &&
+        opengl_ok &&
+        scene_ok &&
+        depth_ok &&
+        early_target_ok &&
+        ui_safe_ok &&
+        depth_config_ok;
+
+    ImGui::Text(
+        "SSO Depth %s",
+        SSODEPTH_VERSION);
+
+    ImGui::Separator();
+
+    if (everything_ok)
+    {
+        ImGui::TextWrapped(
+            "Everything looks good. SSO Depth has detected the "
+            "3D scene and depth buffer, and UI-safe effect "
+            "rendering has been confirmed.");
+    }
+    else if (!scene_ok)
+    {
+        ImGui::TextWrapped(
+            "Waiting for Star Stable's 3D scene. If you are "
+            "already fully loaded into the game world, one or "
+            "more checks below may need attention.");
+    }
+    else
+    {
+        ImGui::TextWrapped(
+            "One or more checks have not been confirmed yet.");
+    }
+
+    ImGui::Separator();
+
+    ImGui::TextUnformatted("Self-test");
+
+    draw_diagnostic_status(
+        runtime_ok,
+        "ReShade runtime detected");
+
+    draw_diagnostic_status(
+        opengl_ok,
+        "OpenGL renderer detected");
+
+    draw_diagnostic_status(
+        scene_ok,
+        "Main 3D scene framebuffer detected");
+
+    draw_diagnostic_status(
+        depth_ok,
+        "Native SSO depth bridge confirmed");
+
+    draw_diagnostic_status(
+        early_target_ok,
+        "Early-effects render target ready");
+
+    draw_diagnostic_status(
+        ui_safe_ok,
+        "UI-safe effect rendering confirmed");
+
+    ImGui::Separator();
+
+    ImGui::TextUnformatted("Depth configuration");
+
+    draw_diagnostic_status(
+        depth_config.upside_down_ok,
+        "Upside down = 1");
+
+    draw_diagnostic_status(
+        depth_config.reversed_ok,
+        "Reversed = 0");
+
+    draw_diagnostic_status(
+        depth_config.logarithmic_ok,
+        "Logarithmic = 0");
+
+    draw_diagnostic_status(
+        depth_config.far_plane_ok,
+        "Far plane = 1000.0");
+
+    if (!depth_config_ok)
+    {
+        ImGui::TextWrapped(
+            "One or more ReShade depth settings do not match "
+            "the configuration expected by SSO Depth.");
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::TreeNode("Technical details"))
+    {
+        ImGui::Text(
+            "Output resolution: %u x %u",
+            output_width,
+            output_height);
+
+        ImGui::Text(
+            "Scene framebuffer: %u",
+            static_cast<unsigned int>(scene_fbo));
+
+        ImGui::Text(
+            "Scene resolution: %u x %u",
+            scene_width,
+            scene_height);
+
+        if (depth_key != 0)
+        {
+            const std::uint32_t depth_fbo =
+                static_cast<std::uint32_t>(
+                    depth_key >> 32);
+
+            const std::uint32_t depth_texture =
+                static_cast<std::uint32_t>(
+                    depth_key & 0xFFFFFFFFull);
+
+            ImGui::Text(
+                "Depth framebuffer: %u",
+                depth_fbo);
+
+            ImGui::Text(
+                "Depth texture: %u",
+                depth_texture);
+        }
+        else
+        {
+            ImGui::TextUnformatted(
+                "Depth framebuffer: not detected");
+
+            ImGui::TextUnformatted(
+                "Depth texture: not detected");
+        }
+
+        ImGui::Spacing();
+
+        ImGui::TextUnformatted("Depth preprocessor values:");
+
+        ImGui::Text(
+            "Upside down: %s",
+            definition_value(
+                depth_config.has_upside_down,
+                depth_config.upside_down));
+
+        ImGui::Text(
+            "Reversed: %s",
+            definition_value(
+                depth_config.has_reversed,
+                depth_config.reversed));
+
+        ImGui::Text(
+            "Logarithmic: %s",
+            definition_value(
+                depth_config.has_logarithmic,
+                depth_config.logarithmic));
+
+        ImGui::Text(
+            "Far plane: %s",
+            definition_value(
+                depth_config.has_far_plane,
+                depth_config.far_plane));
+
+        ImGui::Spacing();
+
+        if (opengl_ok)
+        {
+            ImGui::Text(
+                "OpenGL vendor: %s",
+                safe_gl_string(GL_VENDOR));
+
+            ImGui::Text(
+                "OpenGL renderer: %s",
+                safe_gl_string(GL_RENDERER));
+
+            ImGui::Text(
+                "OpenGL version: %s",
+                safe_gl_string(GL_VERSION));
+        }
+
+        ImGui::Spacing();
+
+        ImGui::TextWrapped(
+            "Loaded add-on: %s",
+            g_addon_path[0] != '\0'
+                ? g_addon_path
+                : "Unavailable");
+
+        ImGui::TextWrapped(
+            "Game executable: %s",
+            g_executable_path[0] != '\0'
+                ? g_executable_path
+                : "Unavailable");
+
+        ImGui::TreePop();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    static bool report_copied = false;
+
+    if (ImGui::Button("Copy diagnostic report"))
+    {
+        const std::uint32_t depth_fbo =
+            static_cast<std::uint32_t>(
+                depth_key >> 32);
+
+        const std::uint32_t depth_texture =
+            static_cast<std::uint32_t>(
+                depth_key & 0xFFFFFFFFull);
+
+        const char *const gl_vendor =
+            opengl_ok
+                ? safe_gl_string(GL_VENDOR)
+                : "Unavailable";
+
+        const char *const gl_renderer =
+            opengl_ok
+                ? safe_gl_string(GL_RENDERER)
+                : "Unavailable";
+
+        const char *const gl_version =
+            opengl_ok
+                ? safe_gl_string(GL_VERSION)
+                : "Unavailable";
+
+        char report[8192] = {};
+
+        std::snprintf(
+            report,
+            sizeof(report),
+            "SSO Depth %s\n"
+            "Status: %s\n"
+            "\n"
+            "Self-test\n"
+            "ReShade runtime: %s\n"
+            "OpenGL renderer: %s\n"
+            "Main 3D scene framebuffer: %s\n"
+            "Native SSO depth bridge: %s\n"
+            "Early-effects render target: %s\n"
+            "UI-safe effect rendering: %s\n"
+            "\n"
+            "Depth configuration\n"
+            "Upside down: %s (%s)\n"
+            "Reversed: %s (%s)\n"
+            "Logarithmic: %s\n"
+            "Far plane: %s\n"
+            "\n"
+            "Rendering details\n"
+            "Output resolution: %u x %u\n"
+            "Scene resolution: %u x %u\n"
+            "Scene framebuffer: %u\n"
+            "Depth framebuffer: %u\n"
+            "Depth texture: %u\n"
+            "\n"
+            "OpenGL\n"
+            "Vendor: %s\n"
+            "Renderer: %s\n"
+            "Version: %s\n"
+            "\n"
+            "Paths\n"
+            "Loaded add-on: %s\n"
+            "Game executable: %s\n",
+            SSODEPTH_VERSION,
+            everything_ok ? "OK" : "CHECK FAILED",
+            runtime_ok ? "OK" : "NOT DETECTED",
+            opengl_ok ? "OK" : "NOT DETECTED",
+            scene_ok ? "OK" : "NOT DETECTED",
+            depth_ok ? "OK" : "NOT CONFIRMED",
+            early_target_ok ? "OK" : "NOT READY",
+            ui_safe_ok ? "OK" : "NOT CONFIRMED",
+            definition_value(
+                depth_config.has_upside_down,
+                depth_config.upside_down),
+            depth_config.upside_down_ok ? "OK" : "EXPECTED 1",
+            definition_value(
+                depth_config.has_reversed,
+                depth_config.reversed),
+            depth_config.reversed_ok ? "OK" : "EXPECTED 0",
+            depth_config.has_logarithmic
+                ? (depth_config.logarithmic_ok
+                    ? "0 (OK)"
+                    : depth_config.logarithmic)
+                : "0 (ReShade default, OK)",
+            depth_config.has_far_plane
+                ? (depth_config.far_plane_ok
+                    ? "1000.0 (OK)"
+                    : depth_config.far_plane)
+                : "1000.0 (ReShade default, OK)",
+            output_width,
+            output_height,
+            scene_width,
+            scene_height,
+            static_cast<unsigned int>(scene_fbo),
+            depth_fbo,
+            depth_texture,
+            gl_vendor,
+            gl_renderer,
+            gl_version,
+            g_addon_path[0] != '\0'
+                ? g_addon_path
+                : "Unavailable",
+            g_executable_path[0] != '\0'
+                ? g_executable_path
+                : "Unavailable");
+
+        ImGui::SetClipboardText(report);
+        report_copied = true;
+    }
+
+    if (report_copied)
+    {
+        ImGui::SameLine();
+        ImGui::TextUnformatted("Copied!");
+    }
+
+    ImGui::TextWrapped(
+        "If something is not working, copy this report and "
+        "include it when asking for help.");
+}
+
+
 BOOL APIENTRY DllMain(
     HMODULE module,
     DWORD reason,
@@ -817,6 +1327,16 @@ BOOL APIENTRY DllMain(
     if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(module);
+
+        GetModuleFileNameA(
+            module,
+            g_addon_path,
+            static_cast<DWORD>(sizeof(g_addon_path)));
+
+        GetModuleFileNameA(
+            nullptr,
+            g_executable_path,
+            static_cast<DWORD>(sizeof(g_executable_path)));
 
         if (!reshade::register_addon(module))
             return FALSE;
@@ -852,6 +1372,10 @@ BOOL APIENTRY DllMain(
 
         reshade::register_event<reshade::addon_event::reshade_begin_effects>(
             &on_reshade_begin_effects);
+
+        reshade::register_overlay(
+            nullptr,
+            &draw_settings_overlay);
 
         reshade::log::message(
             reshade::log::level::info,

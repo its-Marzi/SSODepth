@@ -28,6 +28,12 @@ if [ ! -d "$RESHADE_DIR/.git" ]; then
         "$RESHADE_DIR"
 fi
 
+if [ ! -f "$RESHADE_DIR/deps/imgui/imgui.h" ]; then
+    echo "==> Fetching Dear ImGui headers"
+
+    git -C "$RESHADE_DIR" submodule update         --init         --depth 1         deps/imgui
+fi
+
 # MinGW on Linux needs lowercase windows.h
 if grep -q '#include <Windows.h>' \
     "$RESHADE_DIR/include/reshade.hpp"; then
@@ -51,6 +57,7 @@ x86_64-w64-mingw32-g++ \
     -DWIN32_LEAN_AND_MEAN \
     -DNOMINMAX \
     -I"$RESHADE_DIR/include" \
+    -I"$RESHADE_DIR/deps/imgui" \
     -I"$RESHADE_DIR/examples/utils" \
     -include "$ROOT/src/reshade_mingw_compat.hpp" \
     -static-libgcc \
