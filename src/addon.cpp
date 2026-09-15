@@ -79,7 +79,7 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
-static constexpr const char *SSODEPTH_VERSION = "0.4.0";
+static constexpr const char *SSODEPTH_VERSION = "0.4.1-test1";
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
@@ -139,6 +139,45 @@ static std::mutex g_texture_views_mutex;
 // Used to avoid writing the same depth bridge message every frame.
 static std::atomic<std::uint64_t> g_last_depth_key { 0 };
 
+// Closest non-default framebuffer seen relative to ReShade's output size.
+// These values are diagnostic only and do not affect scene selection.
+static std::atomic<GLuint> g_candidate_fbo { 0 };
+static std::atomic<std::uint32_t> g_candidate_width { 0 };
+static std::atomic<std::uint32_t> g_candidate_height { 0 };
+static std::atomic<int> g_candidate_depth_bits { 0 };
+static std::atomic<bool> g_candidate_depth_test { false };
+static std::atomic<bool> g_candidate_depth_write { false };
+static std::atomic<std::uint32_t> g_candidate_depth_score { 0 };
+static std::atomic<std::uint32_t> g_candidate_distance { 0xFFFFFFFFu };
+
+
+static constexpr std::uint32_t SCENE_SIZE_TOLERANCE = 2;
+
+
+static bool dimension_matches(
+    std::uint32_t value,
+    std::uint32_t expected)
+{
+    const std::uint32_t difference =
+        value > expected
+            ? value - expected
+            : expected - value;
+
+    return difference <= SCENE_SIZE_TOLERANCE;
+}
+
+
+static bool scene_size_matches(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t output_width,
+    std::uint32_t output_height)
+{
+    return
+        dimension_matches(width, output_width) &&
+        dimension_matches(height, output_height);
+}
+
 
 static void detect_scene_framebuffer()
 {
@@ -163,9 +202,98 @@ static void detect_scene_framebuffer()
     if (output_width == 0 || output_height == 0)
         return;
 
+    // Keep the closest non-default framebuffer for diagnostics even when
+    // it fails one of the actual scene-detection checks below.
+    if (draw_fbo != 0 && viewport[2] > 0 && viewport[3] > 0)
+    {
+        const std::uint32_t viewport_width =
+            static_cast<std::uint32_t>(viewport[2]);
+
+        const std::uint32_t viewport_height =
+            static_cast<std::uint32_t>(viewport[3]);
+
+        const std::uint32_t width_difference =
+            viewport_width > output_width
+                ? viewport_width - output_width
+                : output_width - viewport_width;
+
+        const std::uint32_t height_difference =
+            viewport_height > output_height
+                ? viewport_height - output_height
+                : output_height - viewport_height;
+
+        const std::uint32_t distance =
+            width_difference + height_difference;
+
+        // Only consider framebuffer passes reasonably close to the
+        // output size. Among those, prefer scene-like depth state first
+        // and resolution distance second.
+        if (width_difference <= 16 && height_difference <= 16)
+        {
+            const std::uint32_t depth_score =
+                (depth_bits >= 24 ? 1u : 0u) +
+                (depth_test ? 1u : 0u) +
+                (depth_write == GL_TRUE ? 1u : 0u);
+
+            const std::uint32_t previous_score =
+                g_candidate_depth_score.load(
+                    std::memory_order_relaxed);
+
+            const std::uint32_t previous_distance =
+                g_candidate_distance.load(
+                    std::memory_order_relaxed);
+
+            const bool better_candidate =
+                g_candidate_fbo.load(std::memory_order_relaxed) == 0 ||
+                depth_score > previous_score ||
+                (depth_score == previous_score &&
+                 distance < previous_distance);
+
+            if (better_candidate)
+            {
+                g_candidate_depth_score.store(
+                    depth_score,
+                    std::memory_order_relaxed);
+
+                g_candidate_distance.store(
+                    distance,
+                    std::memory_order_relaxed);
+
+                g_candidate_fbo.store(
+                    static_cast<GLuint>(draw_fbo),
+                    std::memory_order_relaxed);
+
+                g_candidate_width.store(
+                    viewport_width,
+                    std::memory_order_relaxed);
+
+                g_candidate_height.store(
+                    viewport_height,
+                    std::memory_order_relaxed);
+
+                g_candidate_depth_bits.store(
+                    depth_bits,
+                    std::memory_order_relaxed);
+
+                g_candidate_depth_test.store(
+                    depth_test,
+                    std::memory_order_relaxed);
+
+                g_candidate_depth_write.store(
+                    depth_write == GL_TRUE,
+                    std::memory_order_relaxed);
+            }
+        }
+    }
+
     const bool full_output =
-        static_cast<std::uint32_t>(viewport[2]) == output_width &&
-        static_cast<std::uint32_t>(viewport[3]) == output_height;
+        viewport[2] > 0 &&
+        viewport[3] > 0 &&
+        scene_size_matches(
+            static_cast<std::uint32_t>(viewport[2]),
+            static_cast<std::uint32_t>(viewport[3]),
+            output_width,
+            output_height);
 
     // SSO's main scene pass matches the current output size and writes depth.
     // This filters out smaller auxiliary render passes.
@@ -679,8 +807,11 @@ static void update_depth_binding(
         g_scene_height.load(std::memory_order_relaxed);
 
     if (scene_fbo == 0 ||
-        scene_width != runtime_width ||
-        scene_height != runtime_height)
+        !scene_size_matches(
+            scene_width,
+            scene_height,
+            runtime_width,
+            runtime_height))
     {
         return;
     }
@@ -1139,6 +1270,24 @@ static void draw_settings_overlay(
     const std::uint32_t output_height =
         g_output_height.load(std::memory_order_relaxed);
 
+    const GLuint candidate_fbo =
+        g_candidate_fbo.load(std::memory_order_relaxed);
+
+    const std::uint32_t candidate_width =
+        g_candidate_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t candidate_height =
+        g_candidate_height.load(std::memory_order_relaxed);
+
+    const int candidate_depth_bits =
+        g_candidate_depth_bits.load(std::memory_order_relaxed);
+
+    const bool candidate_depth_test =
+        g_candidate_depth_test.load(std::memory_order_relaxed);
+
+    const bool candidate_depth_write =
+        g_candidate_depth_write.load(std::memory_order_relaxed);
+
     const std::uint64_t depth_key =
         g_last_depth_key.load(std::memory_order_relaxed);
 
@@ -1309,6 +1458,41 @@ static void draw_settings_overlay(
             scene_width,
             scene_height);
 
+        ImGui::Spacing();
+
+        if (candidate_fbo != 0)
+        {
+            ImGui::TextUnformatted("Closest scene candidate:");
+
+            ImGui::Text(
+                "Framebuffer: %u",
+                static_cast<unsigned int>(candidate_fbo));
+
+            ImGui::Text(
+                "Viewport: %u x %u",
+                candidate_width,
+                candidate_height);
+
+            ImGui::Text(
+                "Depth bits: %d",
+                candidate_depth_bits);
+
+            ImGui::Text(
+                "Depth test: %s",
+                candidate_depth_test ? "enabled" : "disabled");
+
+            ImGui::Text(
+                "Depth write: %s",
+                candidate_depth_write ? "enabled" : "disabled");
+        }
+        else
+        {
+            ImGui::TextUnformatted(
+                "Closest scene candidate: not detected");
+        }
+
+        ImGui::Spacing();
+
         if (depth_key != 0)
         {
             const std::uint32_t depth_fbo =
@@ -1456,6 +1640,14 @@ static void draw_settings_overlay(
             "Output resolution: %u x %u\n"
             "Scene resolution: %u x %u\n"
             "Scene framebuffer: %u\n"
+            "\n"
+            "Closest scene candidate\n"
+            "Framebuffer: %u\n"
+            "Viewport: %u x %u\n"
+            "Depth bits: %d\n"
+            "Depth test: %s\n"
+            "Depth write: %s\n"
+            "\n"
             "Depth framebuffer: %u\n"
             "Depth texture: %u\n"
             "\n"
@@ -1505,6 +1697,12 @@ static void draw_settings_overlay(
             scene_width,
             scene_height,
             static_cast<unsigned int>(scene_fbo),
+            static_cast<unsigned int>(candidate_fbo),
+            candidate_width,
+            candidate_height,
+            candidate_depth_bits,
+            candidate_depth_test ? "enabled" : "disabled",
+            candidate_depth_write ? "enabled" : "disabled",
             depth_fbo,
             depth_texture,
             gl_vendor,
