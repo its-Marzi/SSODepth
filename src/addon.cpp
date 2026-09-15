@@ -79,7 +79,7 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
-static constexpr const char *SSODEPTH_VERSION = "0.4.1-test2";
+static constexpr const char *SSODEPTH_VERSION = "0.4.1-test3";
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
@@ -204,6 +204,56 @@ static bool scene_size_matches(
     return
         dimension_matches(width, output_width) &&
         dimension_matches(height, output_height);
+}
+
+
+static bool scaled_scene_size_matches(
+    std::uint32_t width,
+    std::uint32_t height,
+    std::uint32_t output_width,
+    std::uint32_t output_height)
+{
+    if (width == 0 ||
+        height == 0 ||
+        output_width == 0 ||
+        output_height == 0)
+    {
+        return false;
+    }
+
+    // Scaled scene rendering is only a fallback for targets smaller
+    // than the final output. Require at least half-size in each
+    // dimension to reject small auxiliary render targets.
+    if (width > output_width + SCENE_SIZE_TOLERANCE ||
+        height > output_height + SCENE_SIZE_TOLERANCE ||
+        static_cast<std::uint64_t>(width) * 2 < output_width ||
+        static_cast<std::uint64_t>(height) * 2 < output_height)
+    {
+        return false;
+    }
+
+    // Compare aspect ratios without floating-point arithmetic:
+    //
+    //     width / height ~= output_width / output_height
+    //
+    // A 1% tolerance accepts cases such as 1280x720 rendered into
+    // a 1366x768/769 output while still rejecting differently shaped
+    // auxiliary buffers.
+    const std::uint64_t left =
+        static_cast<std::uint64_t>(width) * output_height;
+
+    const std::uint64_t right =
+        static_cast<std::uint64_t>(output_width) * height;
+
+    const std::uint64_t difference =
+        left > right
+            ? left - right
+            : right - left;
+
+    const std::uint64_t reference =
+        left > right ? left : right;
+
+    return difference * 100 <= reference;
 }
 
 
@@ -471,34 +521,90 @@ static void detect_scene_framebuffer()
         }
     }
 
-    const bool full_output =
-        viewport[2] > 0 &&
-        viewport[3] > 0 &&
+    const std::uint32_t viewport_width =
+        viewport[2] > 0
+            ? static_cast<std::uint32_t>(viewport[2])
+            : 0;
+
+    const std::uint32_t viewport_height =
+        viewport[3] > 0
+            ? static_cast<std::uint32_t>(viewport[3])
+            : 0;
+
+    const bool near_output =
         scene_size_matches(
-            static_cast<std::uint32_t>(viewport[2]),
-            static_cast<std::uint32_t>(viewport[3]),
+            viewport_width,
+            viewport_height,
             output_width,
             output_height);
 
-    // SSO's main scene pass matches the current output size and writes depth.
-    // This filters out smaller auxiliary render passes.
-    if (draw_fbo != 0 &&
-        full_output &&
+    const bool scaled_output =
+        !near_output &&
+        scaled_scene_size_matches(
+            viewport_width,
+            viewport_height,
+            output_width,
+            output_height);
+
+    const bool scene_state =
+        draw_fbo != 0 &&
         depth_bits >= 24 &&
         depth_test &&
-        depth_write == GL_TRUE)
+        depth_write == GL_TRUE;
+
+    if (scene_state && (near_output || scaled_output))
     {
-        g_scene_fbo.store(
-            static_cast<GLuint>(draw_fbo),
-            std::memory_order_relaxed);
+        bool accept_candidate = near_output;
 
-        g_scene_width.store(
-            static_cast<std::uint32_t>(viewport[2]),
-            std::memory_order_relaxed);
+        if (scaled_output)
+        {
+            const std::uint32_t current_width =
+                g_scene_width.load(std::memory_order_relaxed);
 
-        g_scene_height.store(
-            static_cast<std::uint32_t>(viewport[3]),
-            std::memory_order_relaxed);
+            const std::uint32_t current_height =
+                g_scene_height.load(std::memory_order_relaxed);
+
+            // Never let a scaled fallback replace a scene target that
+            // already matches the output closely.
+            const bool current_is_near_output =
+                scene_size_matches(
+                    current_width,
+                    current_height,
+                    output_width,
+                    output_height);
+
+            if (!current_is_near_output)
+            {
+                // Among scaled fallbacks, prefer the largest target.
+                // This favors the main scene over smaller same-aspect
+                // auxiliary buffers.
+                const std::uint64_t current_area =
+                    static_cast<std::uint64_t>(current_width) *
+                    current_height;
+
+                const std::uint64_t candidate_area =
+                    static_cast<std::uint64_t>(viewport_width) *
+                    viewport_height;
+
+                accept_candidate =
+                    candidate_area >= current_area;
+            }
+        }
+
+        if (accept_candidate)
+        {
+            g_scene_fbo.store(
+                static_cast<GLuint>(draw_fbo),
+                std::memory_order_relaxed);
+
+            g_scene_width.store(
+                viewport_width,
+                std::memory_order_relaxed);
+
+            g_scene_height.store(
+                viewport_height,
+                std::memory_order_relaxed);
+        }
     }
 
 }
@@ -992,11 +1098,16 @@ static void update_depth_binding(
         g_scene_height.load(std::memory_order_relaxed);
 
     if (scene_fbo == 0 ||
-        !scene_size_matches(
-            scene_width,
-            scene_height,
-            runtime_width,
-            runtime_height))
+        (!scene_size_matches(
+             scene_width,
+             scene_height,
+             runtime_width,
+             runtime_height) &&
+         !scaled_scene_size_matches(
+             scene_width,
+             scene_height,
+             runtime_width,
+             runtime_height)))
     {
         return;
     }
