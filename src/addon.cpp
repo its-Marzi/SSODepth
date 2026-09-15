@@ -79,7 +79,7 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
-static constexpr const char *SSODEPTH_VERSION = "0.4.1-test3";
+static constexpr const char *SSODEPTH_VERSION = "0.4.1";
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
@@ -1794,7 +1794,7 @@ static void draw_settings_overlay(
 
         if (candidate_fbo != 0)
         {
-            ImGui::TextUnformatted("Closest scene candidate:");
+            ImGui::TextUnformatted("Near-output scene candidate:");
 
             ImGui::Text(
                 "Framebuffer: %u",
@@ -1820,7 +1820,7 @@ static void draw_settings_overlay(
         else
         {
             ImGui::TextUnformatted(
-                "Closest scene candidate: not detected");
+                "Near-output scene candidate: not detected");
         }
 
         ImGui::Spacing();
@@ -2032,7 +2032,7 @@ static void draw_settings_overlay(
             "Scene resolution: %u x %u\n"
             "Scene framebuffer: %u\n"
             "\n"
-            "Closest scene candidate\n"
+            "Near-output scene candidate\n"
             "Framebuffer: %u\n"
             "Viewport: %u x %u\n"
             "Depth bits: %d\n"
