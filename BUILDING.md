@@ -31,19 +31,31 @@ git clone https://github.com/its-Marzi/SSODepth.git
 cd SSODepth
 ```
 
-Then run:
+For the normal ReShade 6.8.0 build, run:
 
 ```bash
 ./build.sh
 ```
 
-The build script will download the required ReShade 6.8.0 headers automatically if they are not already present.
-
-If everything succeeds, the finished add-on will be created at:
+This downloads the required ReShade 6.8.0 headers automatically and produces:
 
 ```text
 build/SSODepth.addon64
 ```
+
+For the legacy ReShade 5.8.0 compatibility build, run:
+
+```bash
+./build-reshade58.sh
+```
+
+This uses a separate ReShade 5.8.0 SDK checkout and produces:
+
+```text
+build/SSODepth-ReShade58.addon64
+```
+
+The two builds target different ReShade add-on API versions, so use the binary that matches the installed ReShade version.
 
 The main source file is:
 

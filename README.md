@@ -7,18 +7,23 @@ A small ReShade add-on that restores depth access in **Star Stable Online** when
 
 In other words: if your DOF, MXAO, fog, or other depth effects aren't working, this is for you.
 
-Tested on Linux through Wine and Windows 11 with ReShade 6.8.0.
+The primary build targets ReShade 6.8.0. A separate legacy compatibility build is available for ReShade 5.8.0.
 
 > [!NOTE]
 > Already have ReShade working in SSO? Installation is just one file.
 
 ## Installation
 
-You need **ReShade 6.8.0 with full add-on support** already working in Star Stable.
+You need **ReShade with full add-on support** already working in Star Stable.
 
-1. Download `SSODepth.addon64` from the [Releases](../../releases) page.
+Use the build that matches your ReShade version:
+
+- ReShade 6.8.0: `SSODepth.addon64`
+- ReShade 5.8.0: `SSODepth-ReShade58.addon64`
+
+1. Download the correct `.addon64` file from the [Releases](../../releases) page.
 2. Find the folder containing `SSOClient.exe`.
-3. Put `SSODepth.addon64` in that same folder.
+3. Put the downloaded `.addon64` file in that same folder.
 4. Start Star Stable normally.
 
 SSO Depth should appear in ReShade's Add-ons tab.
@@ -37,8 +42,9 @@ No extra UI shader or special technique order is required.
 
 First make sure:
 
-- `SSODepth.addon64` is next to `SSOClient.exe`
-- you are using ReShade 6.8.0 with full add-on support
+- the correct SSO Depth `.addon64` file is next to `SSOClient.exe`
+- the add-on build matches your ReShade version
+- you are using ReShade with full add-on support
 - SSO Depth appears in ReShade's Add-ons tab
 
 <details>
