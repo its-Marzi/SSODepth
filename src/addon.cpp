@@ -16,6 +16,59 @@
 #include "state_tracking.hpp"
 
 
+#if RESHADE_API_VERSION <= 7
+
+#define SSO_LOG_MESSAGE reshade::log_message
+#define SSO_LOG_LEVEL reshade::log_level
+#define SSO_GET_CONFIG_VALUE reshade::config_get_value
+#define SSO_SET_CONFIG_VALUE reshade::config_set_value
+
+using sso_state_tracking_type = state_block;
+
+static sso_state_tracking_type *get_sso_state_tracking(
+    reshade::api::command_list *cmd_list)
+{
+    return &cmd_list->get_private_data<sso_state_tracking_type>();
+}
+
+static void register_sso_state_tracking()
+{
+    register_state_tracking();
+}
+
+static void unregister_sso_state_tracking()
+{
+    unregister_state_tracking();
+}
+
+#else
+
+#define SSO_LOG_MESSAGE reshade::log::message
+#define SSO_LOG_LEVEL reshade::log::level
+#define SSO_GET_CONFIG_VALUE reshade::get_config_value
+#define SSO_SET_CONFIG_VALUE reshade::set_config_value
+
+using sso_state_tracking_type = state_tracking;
+
+static sso_state_tracking_type *get_sso_state_tracking(
+    reshade::api::command_list *cmd_list)
+{
+    return cmd_list->get_private_data<sso_state_tracking_type>();
+}
+
+static void register_sso_state_tracking()
+{
+    state_tracking::register_events();
+}
+
+static void unregister_sso_state_tracking()
+{
+    state_tracking::unregister_events();
+}
+
+#endif
+
+
 #ifndef GL_DRAW_FRAMEBUFFER_BINDING
 #define GL_DRAW_FRAMEBUFFER_BINDING 0x8CA6
 #endif
@@ -79,7 +132,12 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
+#if RESHADE_API_VERSION <= 7
+static constexpr const char *SSODEPTH_VERSION =
+    "0.4.1 (ReShade 5.8)";
+#else
 static constexpr const char *SSODEPTH_VERSION = "0.4.1";
+#endif
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
@@ -705,8 +763,8 @@ static bool ensure_early_effects_target(
 
     if (tex_storage_2d == nullptr)
     {
-        reshade::log::message(
-            reshade::log::level::error,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::error,
             "Required OpenGL glTexStorage2D function is unavailable.");
 
         return false;
@@ -775,8 +833,8 @@ static bool ensure_early_effects_target(
             1,
             &texture);
 
-        reshade::log::message(
-            reshade::log::level::error,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::error,
             "Failed to allocate the early-effects OpenGL texture.");
 
         return false;
@@ -808,8 +866,8 @@ static bool ensure_early_effects_target(
             1,
             &texture);
 
-        reshade::log::message(
-            reshade::log::level::error,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::error,
             "Failed to create the early-effects sRGB render-target view.");
 
         return false;
@@ -894,8 +952,8 @@ static void render_effects_before_ui(
     if (g_early_effects_texture == 0)
         return;
 
-    state_tracking *const current_state =
-        cmd_list->get_private_data<state_tracking>();
+    sso_state_tracking_type *const current_state =
+        get_sso_state_tracking(cmd_list);
 
     if (current_state == nullptr)
         return;
@@ -923,8 +981,8 @@ static void render_effects_before_ui(
             true,
             std::memory_order_relaxed))
     {
-        reshade::log::message(
-            reshade::log::level::info,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::info,
             "Rendering ReShade effects before SSO UI composite.");
     }
 
@@ -1156,13 +1214,50 @@ static void update_depth_binding(
             scene_fbo,
             texture_id);
 
-        reshade::log::message(
-            reshade::log::level::info,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::info,
             message);
     }
 }
 
 
+
+
+template <size_t SIZE>
+static bool get_sso_global_preprocessor_definition(
+    reshade::api::effect_runtime *runtime,
+    const char *name,
+    char (&value)[SIZE])
+{
+#if RESHADE_API_VERSION <= 7
+    return runtime->get_preprocessor_definition(
+        name,
+        value);
+#else
+    return runtime->get_preprocessor_definition_for_effect(
+        "GLOBAL",
+        name,
+        value);
+#endif
+}
+
+
+static void set_sso_global_preprocessor_definition(
+    reshade::api::effect_runtime *runtime,
+    const char *name,
+    const char *value)
+{
+#if RESHADE_API_VERSION <= 7
+    runtime->set_preprocessor_definition(
+        name,
+        value);
+#else
+    runtime->set_preprocessor_definition_for_effect(
+        "GLOBAL",
+        name,
+        value);
+#endif
+}
 
 
 static bool configure_depth_if_needed(
@@ -1180,7 +1275,7 @@ static void on_init_effect_runtime(
 
     bool auto_configure_depth = true;
 
-    reshade::get_config_value(
+    SSO_GET_CONFIG_VALUE(
         nullptr,
         "SSODEPTH",
         "AutoConfigureDepth",
@@ -1398,26 +1493,26 @@ static bool configure_depth_if_needed(
     char global_far_plane[64] = {};
 
     const bool has_global_upside_down =
-        runtime->get_preprocessor_definition_for_effect(
-            "GLOBAL",
+        get_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
             global_upside_down);
 
     const bool has_global_reversed =
-        runtime->get_preprocessor_definition_for_effect(
-            "GLOBAL",
+        get_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_INPUT_IS_REVERSED",
             global_reversed);
 
     const bool has_global_logarithmic =
-        runtime->get_preprocessor_definition_for_effect(
-            "GLOBAL",
+        get_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC",
             global_logarithmic);
 
     const bool has_global_far_plane =
-        runtime->get_preprocessor_definition_for_effect(
-            "GLOBAL",
+        get_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_LINEARIZATION_FAR_PLANE",
             global_far_plane);
 
@@ -1445,8 +1540,8 @@ static bool configure_depth_if_needed(
     if (!has_global_upside_down ||
         std::strcmp(global_upside_down, "1") != 0)
     {
-        runtime->set_preprocessor_definition_for_effect(
-            "GLOBAL",
+        set_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
             "1");
 
@@ -1456,8 +1551,8 @@ static bool configure_depth_if_needed(
     if (!has_global_reversed ||
         std::strcmp(global_reversed, "0") != 0)
     {
-        runtime->set_preprocessor_definition_for_effect(
-            "GLOBAL",
+        set_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_INPUT_IS_REVERSED",
             "0");
 
@@ -1469,8 +1564,8 @@ static bool configure_depth_if_needed(
     if (has_global_logarithmic &&
         std::strcmp(global_logarithmic, "0") != 0)
     {
-        runtime->set_preprocessor_definition_for_effect(
-            "GLOBAL",
+        set_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_INPUT_IS_LOGARITHMIC",
             "0");
 
@@ -1480,17 +1575,23 @@ static bool configure_depth_if_needed(
     if (has_global_far_plane &&
         !global_far_plane_ok)
     {
-        runtime->set_preprocessor_definition_for_effect(
-            "GLOBAL",
+        set_sso_global_preprocessor_definition(
+            runtime,
             "RESHADE_DEPTH_LINEARIZATION_FAR_PLANE",
             "1000.0");
 
         changed = true;
     }
 
-    // Preset definitions take precedence over global definitions.
-    // Remove depth overrides from the active preset so it inherits
+#if RESHADE_API_VERSION > 7
+    // Modern ReShade exposes the active preset as a dedicated
+    // "PRESET" scope. Remove depth overrides there so it inherits
     // SSO Depth's canonical global configuration.
+    //
+    // ReShade 5.8 does not provide this scope distinction through
+    // the add-on API. Its setter with a null value removes matching
+    // definitions from the active preset and global configuration,
+    // so performing this cleanup there would undo the settings above.
     const char *const depth_definitions[] = {
         "RESHADE_DEPTH_INPUT_IS_UPSIDE_DOWN",
         "RESHADE_DEPTH_INPUT_IS_REVERSED",
@@ -1515,6 +1616,7 @@ static bool configure_depth_if_needed(
             changed = true;
         }
     }
+#endif
 
     if (changed)
     {
@@ -1522,8 +1624,8 @@ static bool configure_depth_if_needed(
             true,
             std::memory_order_relaxed);
 
-        reshade::log::message(
-            reshade::log::level::info,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::info,
             "Corrected ReShade depth configuration for SSO.");
     }
 
@@ -1726,7 +1828,7 @@ static void draw_settings_overlay(
             auto_configure_depth,
             std::memory_order_relaxed);
 
-        reshade::set_config_value(
+        SSO_SET_CONFIG_VALUE(
             nullptr,
             "SSODEPTH",
             "AutoConfigureDepth",
@@ -2172,7 +2274,7 @@ BOOL APIENTRY DllMain(
 
         // Register state tracking first so its captured state is current
         // when SSODepth's callbacks execute.
-        state_tracking::register_events();
+        register_sso_state_tracking();
 
         reshade::register_event<reshade::addon_event::init_effect_runtime>(
             &on_init_effect_runtime);
@@ -2206,13 +2308,13 @@ BOOL APIENTRY DllMain(
             nullptr,
             &draw_settings_overlay);
 
-        reshade::log::message(
-            reshade::log::level::info,
+        SSO_LOG_MESSAGE(
+            SSO_LOG_LEVEL::info,
             "SSO Depth loaded.");
     }
     else if (reason == DLL_PROCESS_DETACH)
     {
-        state_tracking::unregister_events();
+        unregister_sso_state_tracking();
 
         // unregister_addon also removes this add-on's remaining callbacks.
         reshade::unregister_addon(module);
