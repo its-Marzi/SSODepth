@@ -79,7 +79,7 @@ extern "C" __declspec(dllexport) const char *ISSUES =
     "https://github.com/its-Marzi/SSODepth/issues";
 
 
-static constexpr const char *SSODEPTH_VERSION = "0.4.1-test1";
+static constexpr const char *SSODEPTH_VERSION = "0.4.1-test2";
 
 static char g_addon_path[MAX_PATH] = {};
 static char g_executable_path[MAX_PATH] = {};
@@ -149,6 +149,34 @@ static std::atomic<bool> g_candidate_depth_test { false };
 static std::atomic<bool> g_candidate_depth_write { false };
 static std::atomic<std::uint32_t> g_candidate_depth_score { 0 };
 static std::atomic<std::uint32_t> g_candidate_distance { 0xFFFFFFFFu };
+
+// Best scene-like non-default framebuffer seen at any resolution.
+// Diagnostic only: this never affects actual scene selection.
+static std::atomic<GLuint> g_any_candidate_fbo { 0 };
+static std::atomic<std::uint32_t> g_any_candidate_width { 0 };
+static std::atomic<std::uint32_t> g_any_candidate_height { 0 };
+static std::atomic<int> g_any_candidate_depth_bits { 0 };
+static std::atomic<bool> g_any_candidate_depth_test { false };
+static std::atomic<bool> g_any_candidate_depth_write { false };
+static std::atomic<std::uint32_t> g_any_candidate_depth_score { 0 };
+static std::atomic<std::uint64_t> g_any_candidate_shape_difference {
+    0xFFFFFFFFFFFFFFFFull
+};
+static std::atomic<std::uint64_t> g_any_candidate_area { 0 };
+
+// Best depth-like pass seen while drawing directly to framebuffer 0.
+// This lets diagnostics distinguish an unusual default-framebuffer
+// scene path from a non-default framebuffer at another resolution.
+static std::atomic<bool> g_default_candidate_seen { false };
+static std::atomic<std::uint32_t> g_default_candidate_width { 0 };
+static std::atomic<std::uint32_t> g_default_candidate_height { 0 };
+static std::atomic<int> g_default_candidate_depth_bits { 0 };
+static std::atomic<bool> g_default_candidate_depth_test { false };
+static std::atomic<bool> g_default_candidate_depth_write { false };
+static std::atomic<std::uint32_t> g_default_candidate_depth_score { 0 };
+static std::atomic<std::uint32_t> g_default_candidate_distance {
+    0xFFFFFFFFu
+};
 
 
 static constexpr std::uint32_t SCENE_SIZE_TOLERANCE = 2;
@@ -225,16 +253,96 @@ static void detect_scene_framebuffer()
         const std::uint32_t distance =
             width_difference + height_difference;
 
-        // Only consider framebuffer passes reasonably close to the
-        // output size. Among those, prefer scene-like depth state first
-        // and resolution distance second.
+        const std::uint32_t depth_score =
+            (depth_bits >= 24 ? 1u : 0u) +
+            (depth_test ? 1u : 0u) +
+            (depth_write == GL_TRUE ? 1u : 0u);
+
+        // For broad diagnostics, consider every non-default framebuffer,
+        // regardless of resolution. Prefer scene-like depth state, then
+        // an aspect ratio similar to the output, then the larger target.
+        const std::uint64_t viewport_aspect_product =
+            static_cast<std::uint64_t>(viewport_width) *
+            output_height;
+
+        const std::uint64_t output_aspect_product =
+            static_cast<std::uint64_t>(output_width) *
+            viewport_height;
+
+        const std::uint64_t shape_difference =
+            viewport_aspect_product > output_aspect_product
+                ? viewport_aspect_product - output_aspect_product
+                : output_aspect_product - viewport_aspect_product;
+
+        const std::uint64_t area =
+            static_cast<std::uint64_t>(viewport_width) *
+            viewport_height;
+
+        const std::uint32_t previous_any_score =
+            g_any_candidate_depth_score.load(
+                std::memory_order_relaxed);
+
+        const std::uint64_t previous_shape_difference =
+            g_any_candidate_shape_difference.load(
+                std::memory_order_relaxed);
+
+        const std::uint64_t previous_area =
+            g_any_candidate_area.load(
+                std::memory_order_relaxed);
+
+        const bool better_any_candidate =
+            g_any_candidate_fbo.load(std::memory_order_relaxed) == 0 ||
+            depth_score > previous_any_score ||
+            (depth_score == previous_any_score &&
+             shape_difference < previous_shape_difference) ||
+            (depth_score == previous_any_score &&
+             shape_difference == previous_shape_difference &&
+             area > previous_area);
+
+        if (better_any_candidate)
+        {
+            g_any_candidate_depth_score.store(
+                depth_score,
+                std::memory_order_relaxed);
+
+            g_any_candidate_shape_difference.store(
+                shape_difference,
+                std::memory_order_relaxed);
+
+            g_any_candidate_area.store(
+                area,
+                std::memory_order_relaxed);
+
+            g_any_candidate_fbo.store(
+                static_cast<GLuint>(draw_fbo),
+                std::memory_order_relaxed);
+
+            g_any_candidate_width.store(
+                viewport_width,
+                std::memory_order_relaxed);
+
+            g_any_candidate_height.store(
+                viewport_height,
+                std::memory_order_relaxed);
+
+            g_any_candidate_depth_bits.store(
+                depth_bits,
+                std::memory_order_relaxed);
+
+            g_any_candidate_depth_test.store(
+                depth_test,
+                std::memory_order_relaxed);
+
+            g_any_candidate_depth_write.store(
+                depth_write == GL_TRUE,
+                std::memory_order_relaxed);
+        }
+
+        // Keep the existing near-output diagnostic too. Among nearby
+        // framebuffers, prefer scene-like depth state first and
+        // resolution distance second.
         if (width_difference <= 16 && height_difference <= 16)
         {
-            const std::uint32_t depth_score =
-                (depth_bits >= 24 ? 1u : 0u) +
-                (depth_test ? 1u : 0u) +
-                (depth_write == GL_TRUE ? 1u : 0u);
-
             const std::uint32_t previous_score =
                 g_candidate_depth_score.load(
                     std::memory_order_relaxed);
@@ -283,6 +391,83 @@ static void detect_scene_framebuffer()
                     depth_write == GL_TRUE,
                     std::memory_order_relaxed);
             }
+        }
+    }
+
+    if (draw_fbo == 0 && viewport[2] > 0 && viewport[3] > 0)
+    {
+        const std::uint32_t viewport_width =
+            static_cast<std::uint32_t>(viewport[2]);
+
+        const std::uint32_t viewport_height =
+            static_cast<std::uint32_t>(viewport[3]);
+
+        const std::uint32_t width_difference =
+            viewport_width > output_width
+                ? viewport_width - output_width
+                : output_width - viewport_width;
+
+        const std::uint32_t height_difference =
+            viewport_height > output_height
+                ? viewport_height - output_height
+                : output_height - viewport_height;
+
+        const std::uint32_t distance =
+            width_difference + height_difference;
+
+        const std::uint32_t depth_score =
+            (depth_bits >= 24 ? 1u : 0u) +
+            (depth_test ? 1u : 0u) +
+            (depth_write == GL_TRUE ? 1u : 0u);
+
+        const std::uint32_t previous_score =
+            g_default_candidate_depth_score.load(
+                std::memory_order_relaxed);
+
+        const std::uint32_t previous_distance =
+            g_default_candidate_distance.load(
+                std::memory_order_relaxed);
+
+        const bool better_default_candidate =
+            !g_default_candidate_seen.load(
+                std::memory_order_relaxed) ||
+            depth_score > previous_score ||
+            (depth_score == previous_score &&
+             distance < previous_distance);
+
+        if (better_default_candidate)
+        {
+            g_default_candidate_seen.store(
+                true,
+                std::memory_order_relaxed);
+
+            g_default_candidate_depth_score.store(
+                depth_score,
+                std::memory_order_relaxed);
+
+            g_default_candidate_distance.store(
+                distance,
+                std::memory_order_relaxed);
+
+            g_default_candidate_width.store(
+                viewport_width,
+                std::memory_order_relaxed);
+
+            g_default_candidate_height.store(
+                viewport_height,
+                std::memory_order_relaxed);
+
+            g_default_candidate_depth_bits.store(
+                depth_bits,
+                std::memory_order_relaxed);
+
+            g_default_candidate_depth_test.store(
+                depth_test,
+                std::memory_order_relaxed);
+
+            g_default_candidate_depth_write.store(
+                depth_write == GL_TRUE,
+                std::memory_order_relaxed);
         }
     }
 
@@ -1288,6 +1473,42 @@ static void draw_settings_overlay(
     const bool candidate_depth_write =
         g_candidate_depth_write.load(std::memory_order_relaxed);
 
+    const GLuint any_candidate_fbo =
+        g_any_candidate_fbo.load(std::memory_order_relaxed);
+
+    const std::uint32_t any_candidate_width =
+        g_any_candidate_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t any_candidate_height =
+        g_any_candidate_height.load(std::memory_order_relaxed);
+
+    const int any_candidate_depth_bits =
+        g_any_candidate_depth_bits.load(std::memory_order_relaxed);
+
+    const bool any_candidate_depth_test =
+        g_any_candidate_depth_test.load(std::memory_order_relaxed);
+
+    const bool any_candidate_depth_write =
+        g_any_candidate_depth_write.load(std::memory_order_relaxed);
+
+    const bool default_candidate_seen =
+        g_default_candidate_seen.load(std::memory_order_relaxed);
+
+    const std::uint32_t default_candidate_width =
+        g_default_candidate_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t default_candidate_height =
+        g_default_candidate_height.load(std::memory_order_relaxed);
+
+    const int default_candidate_depth_bits =
+        g_default_candidate_depth_bits.load(std::memory_order_relaxed);
+
+    const bool default_candidate_depth_test =
+        g_default_candidate_depth_test.load(std::memory_order_relaxed);
+
+    const bool default_candidate_depth_write =
+        g_default_candidate_depth_write.load(std::memory_order_relaxed);
+
     const std::uint64_t depth_key =
         g_last_depth_key.load(std::memory_order_relaxed);
 
@@ -1493,6 +1714,65 @@ static void draw_settings_overlay(
 
         ImGui::Spacing();
 
+        if (any_candidate_fbo != 0)
+        {
+            ImGui::TextUnformatted(
+                "Best non-default depth candidate:");
+
+            ImGui::Text(
+                "Framebuffer: %u",
+                static_cast<unsigned int>(any_candidate_fbo));
+
+            ImGui::Text(
+                "Viewport: %u x %u",
+                any_candidate_width,
+                any_candidate_height);
+
+            ImGui::Text(
+                "Depth bits: %d",
+                any_candidate_depth_bits);
+
+            ImGui::Text(
+                "Depth test: %s",
+                any_candidate_depth_test ? "enabled" : "disabled");
+
+            ImGui::Text(
+                "Depth write: %s",
+                any_candidate_depth_write ? "enabled" : "disabled");
+        }
+        else
+        {
+            ImGui::TextUnformatted(
+                "Best non-default depth candidate: not detected");
+        }
+
+        ImGui::Spacing();
+
+        ImGui::TextUnformatted("Best default framebuffer pass:");
+
+        ImGui::Text(
+            "Seen: %s",
+            default_candidate_seen ? "yes" : "no");
+
+        ImGui::Text(
+            "Viewport: %u x %u",
+            default_candidate_width,
+            default_candidate_height);
+
+        ImGui::Text(
+            "Depth bits: %d",
+            default_candidate_depth_bits);
+
+        ImGui::Text(
+            "Depth test: %s",
+            default_candidate_depth_test ? "enabled" : "disabled");
+
+        ImGui::Text(
+            "Depth write: %s",
+            default_candidate_depth_write ? "enabled" : "disabled");
+
+        ImGui::Spacing();
+
         if (depth_key != 0)
         {
             const std::uint32_t depth_fbo =
@@ -1648,6 +1928,20 @@ static void draw_settings_overlay(
             "Depth test: %s\n"
             "Depth write: %s\n"
             "\n"
+            "Best non-default depth candidate\n"
+            "Framebuffer: %u\n"
+            "Viewport: %u x %u\n"
+            "Depth bits: %d\n"
+            "Depth test: %s\n"
+            "Depth write: %s\n"
+            "\n"
+            "Best default framebuffer pass\n"
+            "Seen: %s\n"
+            "Viewport: %u x %u\n"
+            "Depth bits: %d\n"
+            "Depth test: %s\n"
+            "Depth write: %s\n"
+            "\n"
             "Depth framebuffer: %u\n"
             "Depth texture: %u\n"
             "\n"
@@ -1703,6 +1997,18 @@ static void draw_settings_overlay(
             candidate_depth_bits,
             candidate_depth_test ? "enabled" : "disabled",
             candidate_depth_write ? "enabled" : "disabled",
+            static_cast<unsigned int>(any_candidate_fbo),
+            any_candidate_width,
+            any_candidate_height,
+            any_candidate_depth_bits,
+            any_candidate_depth_test ? "enabled" : "disabled",
+            any_candidate_depth_write ? "enabled" : "disabled",
+            default_candidate_seen ? "yes" : "no",
+            default_candidate_width,
+            default_candidate_height,
+            default_candidate_depth_bits,
+            default_candidate_depth_test ? "enabled" : "disabled",
+            default_candidate_depth_write ? "enabled" : "disabled",
             depth_fbo,
             depth_texture,
             gl_vendor,
