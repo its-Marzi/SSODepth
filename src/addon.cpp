@@ -134,9 +134,9 @@ extern "C" __declspec(dllexport) const char *ISSUES =
 
 #if RESHADE_API_VERSION <= 7
 static constexpr const char *SSODEPTH_VERSION =
-    "0.4.2-dev2 (ReShade 5.8)";
+    "0.4.2 (ReShade 5.8)";
 #else
-static constexpr const char *SSODEPTH_VERSION = "0.4.2-dev2";
+static constexpr const char *SSODEPTH_VERSION = "0.4.2";
 #endif
 
 static char g_addon_path[MAX_PATH] = {};
