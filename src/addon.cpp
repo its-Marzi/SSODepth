@@ -134,9 +134,9 @@ extern "C" __declspec(dllexport) const char *ISSUES =
 
 #if RESHADE_API_VERSION <= 7
 static constexpr const char *SSODEPTH_VERSION =
-    "0.4.1 (ReShade 5.8)";
+    "0.4.2-dev2 (ReShade 5.8)";
 #else
-static constexpr const char *SSODEPTH_VERSION = "0.4.1";
+static constexpr const char *SSODEPTH_VERSION = "0.4.2-dev2";
 #endif
 
 static char g_addon_path[MAX_PATH] = {};
@@ -312,6 +312,42 @@ static bool scaled_scene_size_matches(
         left > right ? left : right;
 
     return difference * 100 <= reference;
+}
+
+
+static void reset_framebuffer_diagnostics()
+{
+    g_candidate_fbo.store(0, std::memory_order_relaxed);
+    g_candidate_width.store(0, std::memory_order_relaxed);
+    g_candidate_height.store(0, std::memory_order_relaxed);
+    g_candidate_depth_bits.store(0, std::memory_order_relaxed);
+    g_candidate_depth_test.store(false, std::memory_order_relaxed);
+    g_candidate_depth_write.store(false, std::memory_order_relaxed);
+    g_candidate_depth_score.store(0, std::memory_order_relaxed);
+    g_candidate_distance.store(0xFFFFFFFFu, std::memory_order_relaxed);
+
+    g_any_candidate_fbo.store(0, std::memory_order_relaxed);
+    g_any_candidate_width.store(0, std::memory_order_relaxed);
+    g_any_candidate_height.store(0, std::memory_order_relaxed);
+    g_any_candidate_depth_bits.store(0, std::memory_order_relaxed);
+    g_any_candidate_depth_test.store(false, std::memory_order_relaxed);
+    g_any_candidate_depth_write.store(false, std::memory_order_relaxed);
+    g_any_candidate_depth_score.store(0, std::memory_order_relaxed);
+    g_any_candidate_shape_difference.store(
+        0xFFFFFFFFFFFFFFFFull,
+        std::memory_order_relaxed);
+    g_any_candidate_area.store(0, std::memory_order_relaxed);
+
+    g_default_candidate_seen.store(false, std::memory_order_relaxed);
+    g_default_candidate_width.store(0, std::memory_order_relaxed);
+    g_default_candidate_height.store(0, std::memory_order_relaxed);
+    g_default_candidate_depth_bits.store(0, std::memory_order_relaxed);
+    g_default_candidate_depth_test.store(false, std::memory_order_relaxed);
+    g_default_candidate_depth_write.store(false, std::memory_order_relaxed);
+    g_default_candidate_depth_score.store(0, std::memory_order_relaxed);
+    g_default_candidate_distance.store(
+        0xFFFFFFFFu,
+        std::memory_order_relaxed);
 }
 
 
@@ -1352,6 +1388,23 @@ static void on_reshade_begin_effects(
         &runtime_width,
         &runtime_height);
 
+    const std::uint32_t previous_output_width =
+        g_output_width.load(std::memory_order_relaxed);
+
+    const std::uint32_t previous_output_height =
+        g_output_height.load(std::memory_order_relaxed);
+
+    if (previous_output_width != 0 &&
+        previous_output_height != 0 &&
+        (runtime_width != previous_output_width ||
+         runtime_height != previous_output_height))
+    {
+        // Candidate scores and distances are relative to the output size.
+        // Discard them when the output changes so diagnostics never mix
+        // data from fullscreen, windowed mode, or an earlier resolution.
+        reset_framebuffer_diagnostics();
+    }
+
     g_output_width.store(runtime_width, std::memory_order_relaxed);
     g_output_height.store(runtime_height, std::memory_order_relaxed);
 
@@ -1750,6 +1803,46 @@ static void draw_settings_overlay(
         depth_config.logarithmic_ok &&
         depth_config.far_plane_ok;
 
+    // A scene-like framebuffer can legitimately be slightly larger than
+    // ReShade's reported output when SSO is running in a window. This is
+    // diagnostic only: it does not relax scene selection.
+    const std::uint32_t candidate_output_width_difference =
+        any_candidate_width > output_width
+            ? any_candidate_width - output_width
+            : output_width - any_candidate_width;
+
+    const std::uint32_t candidate_output_height_difference =
+        any_candidate_height > output_height
+            ? any_candidate_height - output_height
+            : output_height - any_candidate_height;
+
+    const bool candidate_reasonably_close_to_output =
+        output_width != 0 &&
+        output_height != 0 &&
+        static_cast<std::uint64_t>(
+            candidate_output_width_difference) * 10 <= output_width &&
+        static_cast<std::uint64_t>(
+            candidate_output_height_difference) * 10 <= output_height;
+
+    const bool possible_windowed_mismatch =
+        !scene_ok &&
+        any_candidate_fbo != 0 &&
+        any_candidate_depth_bits >= 24 &&
+        any_candidate_depth_test &&
+        any_candidate_depth_write &&
+        default_candidate_seen &&
+        scene_size_matches(
+            any_candidate_width,
+            any_candidate_height,
+            default_candidate_width,
+            default_candidate_height) &&
+        !scene_size_matches(
+            any_candidate_width,
+            any_candidate_height,
+            output_width,
+            output_height) &&
+        candidate_reasonably_close_to_output;
+
     const bool everything_ok =
         runtime_ok &&
         opengl_ok &&
@@ -1783,6 +1876,18 @@ static void draw_settings_overlay(
     {
         ImGui::TextWrapped(
             "One or more checks have not been confirmed yet.");
+    }
+
+    if (possible_windowed_mismatch)
+    {
+        ImGui::Spacing();
+
+        ImGui::TextWrapped(
+            "Possible windowed-mode output mismatch detected. "
+            "A scene-like depth framebuffer matches Star Stable's "
+            "default framebuffer viewport, but its size does not match "
+            "the output size reported by ReShade. If SSO is running in "
+            "windowed mode, try fullscreen and restart the game.");
     }
 
     ImGui::Separator();
@@ -2112,6 +2217,7 @@ static void draw_settings_overlay(
             sizeof(report),
             "SSO Depth %s\n"
             "Status: %s\n"
+            "Possible windowed-mode mismatch: %s\n"
             "\n"
             "Self-test\n"
             "ReShade runtime: %s\n"
@@ -2168,6 +2274,7 @@ static void draw_settings_overlay(
             "Game executable: %s\n",
             SSODEPTH_VERSION,
             everything_ok ? "OK" : "CHECK FAILED",
+            possible_windowed_mismatch ? "YES" : "no",
             runtime_ok ? "OK" : "NOT DETECTED",
             opengl_ok ? "OK" : "NOT DETECTED",
             scene_ok ? "OK" : "NOT DETECTED",
